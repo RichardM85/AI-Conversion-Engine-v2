@@ -1,7 +1,6 @@
 import dotenv from "dotenv";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
-import { chromium } from "playwright";
 
 dotenv.config();
 
@@ -14,6 +13,9 @@ const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrout
 const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL || "meta-llama/llama-3-70b-instruct";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
+const IS_VERCEL_RUNTIME = Boolean(process.env.VERCEL);
+const IS_SERVERLESS_RUNTIME =
+  IS_VERCEL_RUNTIME || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
 
 const CTA_MATCHERS = [
   "buy",
@@ -891,6 +893,61 @@ async function collectVisualMetrics(page) {
   });
 }
 
+async function launchAnalysisBrowser() {
+  const runtimeLabel = IS_SERVERLESS_RUNTIME ? "vercel-serverless" : "local";
+  console.log("Browser runtime environment", {
+    runtime: runtimeLabel,
+    vercel: IS_VERCEL_RUNTIME,
+    nodeEnv: process.env.NODE_ENV || "development",
+  });
+
+  if (IS_SERVERLESS_RUNTIME) {
+    const chromiumPackage = await import("@sparticuz/chromium");
+    const sparticuzChromium = chromiumPackage.default || chromiumPackage;
+    const { chromium: playwrightChromium } = await import("playwright-core");
+    const executablePath = await sparticuzChromium.executablePath();
+
+    console.log("Using serverless chromium executable", {
+      executablePath,
+      headless: sparticuzChromium.headless,
+      argsCount: sparticuzChromium.args.length,
+    });
+
+    try {
+      const browser = await playwrightChromium.launch({
+        executablePath,
+        args: sparticuzChromium.args,
+        headless: sparticuzChromium.headless,
+      });
+      console.log("Browser launch success", { runtime: runtimeLabel, executablePath });
+      return browser;
+    } catch (error) {
+      console.error("Browser launch failure", {
+        runtime: runtimeLabel,
+        executablePath,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  const { chromium } = await import("playwright");
+  console.log("Using local Playwright chromium");
+
+  try {
+    const browser = await chromium.launch({ headless: true });
+    console.log("Browser launch success", { runtime: runtimeLabel, executablePath: "bundled" });
+    return browser;
+  } catch (error) {
+    console.error("Browser launch failure", {
+      runtime: runtimeLabel,
+      executablePath: "bundled",
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
 async function handlePageOverlays(page, options = {}) {
   try {
     const { stabilize = false } = options;
@@ -1152,8 +1209,11 @@ async function captureAndExtract(url, warnings, language) {
   }
 
   try {
-    console.log("Launching browser");
-    browser = await chromium.launch({ headless: true });
+    console.log("Starting screenshot capture", {
+      runtime: IS_SERVERLESS_RUNTIME ? "vercel-serverless" : "local",
+      url,
+    });
+    browser = await launchAnalysisBrowser();
 
     desktopPage = await browser.newPage({
       viewport: { width: 1280, height: 900 },
@@ -1172,7 +1232,9 @@ async function captureAndExtract(url, warnings, language) {
         animations: "disabled",
       });
       screenshotUrls.desktop = bufferToDataUrl(desktopBuffer);
-      console.log("Desktop screenshot captured");
+      console.log("Desktop screenshot captured", {
+        success: Boolean(screenshotUrls.desktop),
+      });
     } catch (error) {
       console.error("Desktop screenshot failed", error.message);
     }
@@ -1192,10 +1254,17 @@ async function captureAndExtract(url, warnings, language) {
         animations: "disabled",
       });
       screenshotUrls.mobile = bufferToDataUrl(mobileBuffer);
-      console.log("Mobile screenshot captured");
+      console.log("Mobile screenshot captured", {
+        success: Boolean(screenshotUrls.mobile),
+      });
     } catch (error) {
       console.error("Mobile screenshot failed", error.message);
     }
+
+    console.log("Screenshot availability", {
+      desktop: Boolean(screenshotUrls.desktop),
+      mobile: Boolean(screenshotUrls.mobile),
+    });
 
     if (!screenshotUrls.desktop && !screenshotUrls.mobile) {
       warnings.push(i18n.screenshotWarning);
@@ -1214,7 +1283,10 @@ async function captureAndExtract(url, warnings, language) {
       visualMetrics,
     };
   } catch (error) {
-    console.error("Screenshot failed", error.message);
+    console.error("Screenshot failed", {
+      runtime: IS_SERVERLESS_RUNTIME ? "vercel-serverless" : "local",
+      message: error.message,
+    });
     warnings.push(i18n.screenshotWarning);
     return {
       evidence: mergeEvidence(extractedEvidence, htmlFallbackEvidence),

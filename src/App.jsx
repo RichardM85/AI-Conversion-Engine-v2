@@ -798,9 +798,9 @@ function App() {
                 </div>
 
                 {result.warnings.length ? (
-                  <div className="summary-block">
+                  <div className="summary-block warning-block">
                     <span className="meta-label">{copy.warnings}</span>
-                    <ul className="bullet-list">
+                    <ul className="bullet-list warning-list">
                       {result.warnings.map((warning) => (
                         <li key={warning}>{warning}</li>
                       ))}
@@ -810,7 +810,7 @@ function App() {
               </section>
             </article>
 
-            <article className="surface-card">
+            <article className="surface-card visual-audit-card">
               <div className="section-head">
                 <span className="section-kicker">{copy.visualAudit}</span>
                 <Eye size={18} />
@@ -819,19 +819,19 @@ function App() {
               <div className={`visual-grid${hasScreenshots ? "" : " visual-grid-empty"}`}>
                 <div className="visual-shots">
                   {result.screenshotUrls?.desktop ? (
-                    <figure className="shot-card">
+                    <figure className="shot-card shot-card-primary">
                       <figcaption>{copy.desktop}</figcaption>
                       <img src={result.screenshotUrls.desktop} alt={copy.desktop} />
                     </figure>
                   ) : null}
                   {result.screenshotUrls?.mobile ? (
-                    <figure className="shot-card shot-card-mobile">
+                    <figure className="shot-card shot-card-secondary shot-card-mobile">
                       <figcaption>{copy.mobile}</figcaption>
                       <img src={result.screenshotUrls.mobile} alt={copy.mobile} />
                     </figure>
                   ) : null}
                   {!result.screenshotUrls?.desktop && !result.screenshotUrls?.mobile ? (
-                    <div className="shot-empty">
+                    <div className="shot-empty shot-empty-state">
                       <Eye size={18} />
                       <p>{copy.noScreenshots}</p>
                     </div>
