@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { createServer } from "node:http";
+import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 
 dotenv.config();
@@ -3240,7 +3241,11 @@ function buildResponse({
   };
 }
 
-const server = createServer(async (request, response) => {
+function isAnalyzeRoute(requestUrl = "") {
+  return requestUrl === "/api/analyze" || requestUrl.startsWith("/api/analyze?");
+}
+
+export async function apiHandler(request, response) {
   if (request.method === "OPTIONS") {
     response.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
@@ -3251,7 +3256,7 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (request.method !== "POST" || request.url !== "/api/analyze") {
+  if (request.method !== "POST" || !isAnalyzeRoute(request.url || "")) {
     sendJson(response, 404, { error: "Not found" });
     return;
   }
@@ -3422,9 +3427,17 @@ const server = createServer(async (request, response) => {
 
     sendJson(response, 200, fallbackResponse);
   }
-});
+}
 
-console.log("Server starting...");
-server.listen(PORT, () => {
-  console.log(`AI Conversion Engine API listening on http://localhost:${PORT}`);
-});
+const isDirectRun =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectRun) {
+  const server = createServer(apiHandler);
+  console.log("Server starting...");
+  server.listen(PORT, () => {
+    console.log(`AI Conversion Engine API listening on http://localhost:${PORT}`);
+  });
+}
+
+export default apiHandler;
