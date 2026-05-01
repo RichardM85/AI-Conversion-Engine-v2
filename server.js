@@ -9,6 +9,8 @@ const REQUEST_TIMEOUT_MS = 20000;
 const SCREENSHOT_TIMEOUT_MS = 30000;
 const AI_TIMEOUT_MS = 45000;
 const PAGE_SETTLE_MS = 1800;
+const SCREENSHOT_IMAGE_TYPE = "jpeg";
+const SCREENSHOT_IMAGE_QUALITY = 46;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL || "meta-llama/llama-3-70b-instruct";
@@ -177,6 +179,16 @@ function getLanguagePack(language) {
   return LANGUAGE_PACK[language] || LANGUAGE_PACK.en;
 }
 
+function pushUniqueWarning(warnings, warning) {
+  if (!warning) {
+    return;
+  }
+
+  if (!warnings.includes(warning)) {
+    warnings.push(warning);
+  }
+}
+
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json",
@@ -205,6 +217,29 @@ function normalizeWhitespace(value) {
     .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function bufferToDataUrl(buffer, mimeType = "image/png") {
+  return `data:${mimeType};base64,${buffer.toString("base64")}`;
+}
+
+async function captureScreenshotDataUrl(page, label) {
+  const screenshotBuffer = await page.screenshot({
+    type: SCREENSHOT_IMAGE_TYPE,
+    quality: SCREENSHOT_IMAGE_TYPE === "jpeg" ? SCREENSHOT_IMAGE_QUALITY : undefined,
+    fullPage: false,
+    animations: "disabled",
+  });
+  const mimeType = SCREENSHOT_IMAGE_TYPE === "jpeg" ? "image/jpeg" : "image/png";
+  const dataUrl = bufferToDataUrl(screenshotBuffer, mimeType);
+  console.log("Screenshot payload created", {
+    label,
+    mimeType,
+    quality: SCREENSHOT_IMAGE_QUALITY,
+    bytes: screenshotBuffer.byteLength,
+    dataUrlLength: dataUrl.length,
+  });
+  return dataUrl;
 }
 
 function sanitizeCtaText(value) {
@@ -308,10 +343,6 @@ function getHostnameLabel(url) {
   } catch {
     return "page";
   }
-}
-
-function bufferToDataUrl(buffer) {
-  return `data:image/png;base64,${buffer.toString("base64")}`;
 }
 
 function decodeHtmlEntities(value) {
@@ -1226,12 +1257,7 @@ async function captureAndExtract(url, warnings, language) {
 
     try {
       await preparePageForScreenshot(desktopPage, "desktop");
-      const desktopBuffer = await desktopPage.screenshot({
-        type: "png",
-        fullPage: false,
-        animations: "disabled",
-      });
-      screenshotUrls.desktop = bufferToDataUrl(desktopBuffer);
+      screenshotUrls.desktop = await captureScreenshotDataUrl(desktopPage, "desktop");
       console.log("Desktop screenshot captured", {
         success: Boolean(screenshotUrls.desktop),
       });
@@ -1248,12 +1274,7 @@ async function captureAndExtract(url, warnings, language) {
 
     try {
       await preparePageForScreenshot(mobilePage, "mobile");
-      const mobileBuffer = await mobilePage.screenshot({
-        type: "png",
-        fullPage: false,
-        animations: "disabled",
-      });
-      screenshotUrls.mobile = bufferToDataUrl(mobileBuffer);
+      screenshotUrls.mobile = await captureScreenshotDataUrl(mobilePage, "mobile");
       console.log("Mobile screenshot captured", {
         success: Boolean(screenshotUrls.mobile),
       });
@@ -1266,8 +1287,8 @@ async function captureAndExtract(url, warnings, language) {
       mobile: Boolean(screenshotUrls.mobile),
     });
 
-    if (!screenshotUrls.desktop && !screenshotUrls.mobile) {
-      warnings.push(i18n.screenshotWarning);
+    if (!screenshotUrls.desktop || !screenshotUrls.mobile) {
+      pushUniqueWarning(warnings, i18n.screenshotWarning);
     }
 
     return {
@@ -1287,7 +1308,7 @@ async function captureAndExtract(url, warnings, language) {
       runtime: IS_SERVERLESS_RUNTIME ? "vercel-serverless" : "local",
       message: error.message,
     });
-    warnings.push(i18n.screenshotWarning);
+    pushUniqueWarning(warnings, i18n.screenshotWarning);
     return {
       evidence: mergeEvidence(extractedEvidence, htmlFallbackEvidence),
       screenshotUrls,
@@ -1637,16 +1658,39 @@ function buildImpactHeadline(impactEstimate, language) {
     : "Revenue opportunity available after monthly revenue input";
 }
 
-function buildPrimaryDecisionConfidence(evidence) {
-  if (!evidence.screenshotsAvailable) {
+function getPrimaryDecisionScore(type, scores) {
+  if (type === "VALUE_PROPOSITION") {
+    return clampScore(Math.min(scores?.valueProposition ?? 10, scores?.aboveTheFold ?? 10), 10);
+  }
+
+  if (type === "CTA") {
+    return clampScore(scores?.cta ?? 10, 10);
+  }
+
+  if (type === "TRUST") {
+    return clampScore(scores?.trustSignals ?? 10, 10);
+  }
+
+  if (type === "MOBILE") {
+    return clampScore(
+      Math.min(scores?.informationHierarchy ?? 10, scores?.aboveTheFold ?? 10),
+      10,
+    );
+  }
+
+  return clampScore(scores?.conversionFriction ?? 10, 10);
+}
+
+function buildPrimaryDecisionConfidence({ evidence, score, isFallback }) {
+  if (isFallback || isWeakEvidence(evidence)) {
     return "low";
   }
 
-  if (isStrongEvidence(evidence)) {
+  if (score >= 4) {
     return "high";
   }
 
-  return isWeakEvidence(evidence) ? "low" : "medium";
+  return "medium";
 }
 
 function buildDecisionSuggestedCopy(type, evidence, language) {
@@ -1678,9 +1722,21 @@ function buildDomOnlyEvidenceNote(language) {
     : "Screenshots are missing, so this point is derived from DOM/text only.";
 }
 
-function selectPrimaryDecision({ evidence, scores, impactEstimate, language }) {
+function buildPrimaryDecisionImpactReason(language) {
+  return language === "de"
+    ? "Basierend auf typischen CRO-Uplifts bei klareren Value Propositions im ersten Screen. Die Spanne ist eine konservative Schätzung, keine exakte Prognose."
+    : "Based on typical CRO uplift ranges from clearer first-screen value propositions. This range is a conservative estimate, not an exact forecast.";
+}
+
+export function getPrimaryDecision(input) {
+  const { evidence, scores, impactEstimate, language, isFallback = false } = input;
   const type = detectPrimaryProblem(evidence, scores);
-  const confidence = buildPrimaryDecisionConfidence(evidence);
+  const decisionScore = getPrimaryDecisionScore(type, scores);
+  const confidence = buildPrimaryDecisionConfidence({
+    evidence,
+    score: decisionScore,
+    isFallback,
+  });
   const productType = inferProductType(evidence, language);
   const originalCta = sanitizeCtaText(evidence.ctas.primaryText);
   const suggestedCopy = buildDecisionSuggestedCopy(type, evidence, language);
@@ -1700,105 +1756,105 @@ function selectPrimaryDecision({ evidence, scores, impactEstimate, language }) {
     addEvidence(
       language === "de"
         ? evidence.structure.h1.length === 0
-          ? "Es wurde keine klare H1-Headline mit erkennbarem Produktnutzen erkannt."
-          : `Es wurde ${evidence.structure.h1.length} H1-Headline erkannt, aber das Nutzenversprechen bleibt im ersten Screen schwach.`
+          ? "Im ersten Screen wurde keine Headline erkannt, die ein konkretes Ergebnis oder einen klaren Produktnutzen benennt."
+          : `Im ersten Screen wurde ${evidence.structure.h1.length} H1-Headline erkannt, aber sie transportiert keinen sofort greifbaren Nutzen fuer den Kauf.`
         : evidence.structure.h1.length === 0
-          ? "No clear H1 headline with an obvious product payoff was detected."
-          : `${evidence.structure.h1.length} H1 headline was detected, but the value proposition stays weak in the first screen.`
+          ? "No first-screen headline was detected that names a concrete outcome or clear product payoff."
+          : `${evidence.structure.h1.length} H1 headline was detected in the first screen, but it does not carry an immediate buying payoff.`
     );
     addEvidence(
       language === "de"
         ? evidence.ctas.aboveTheFold
-          ? `Oberhalb des ersten Scrolls wurde ein CTA erkannt, aber er ist noch nicht eng genug mit einem klaren Ergebnis verknüpft.`
-          : "Oberhalb des ersten Scrolls wurde keine klare Handlungsführung als nächster Schritt erkannt."
+          ? "Eine CTA ist oberhalb des ersten Scrolls vorhanden, steht aber nicht direkt neben einem klaren Ergebnisversprechen."
+          : "Oberhalb des ersten Scrolls wurde keine sichtbare Handlungsfuehrung erkannt, die den naechsten Schritt absichert."
         : evidence.ctas.aboveTheFold
-          ? "A CTA was detected above the first scroll, but it is not tightly connected to a clear outcome."
-          : "No clear next-step guidance was detected above the first scroll."
+          ? "A CTA is present above the first scroll, but it is not attached to a clear outcome promise."
+          : "No visible next-step guidance was detected above the first scroll to secure the buying step."
     );
     addEvidence(
       language === "de"
-        ? `Die Seite liefert ${evidence.text.totalTextLength} Zeichen Text und eine Produkttiefe von ${evidence.product.productDetailScore}, aber der Kernnutzen verdichtet sich nicht früh genug.`
-        : `The page provides ${evidence.text.totalTextLength} characters of text and a product depth score of ${evidence.product.productDetailScore}, but the core payoff does not condense early enough.`
+        ? `Die Seite liefert ${evidence.text.totalTextLength} Zeichen Text und eine Produkttiefe von ${evidence.product.productDetailScore}, aber der Kernnutzen landet nicht frueh genug im ersten Screen.`
+        : `The page provides ${evidence.text.totalTextLength} characters of text and a product depth score of ${evidence.product.productDetailScore}, but the core payoff does not land early enough in the first screen.`
     );
   } else if (type === "CTA") {
     addEvidence(
       language === "de"
         ? originalCta
-          ? `Der primäre CTA lautet nur "${originalCta}" und erklärt keinen konkreten nächsten Nutzen.`
-          : "Es wurde kein belastbarer primärer CTA als nächster Schritt erkannt."
+          ? `Der primaere CTA lautet "${originalCta}" und beschreibt kein konkretes Ergebnis des Klicks.`
+          : "Es wurde kein primaerer CTA erkannt, der den naechsten Schritt eindeutig ausloest."
         : originalCta
-          ? `The primary CTA is only "${originalCta}" and does not explain a concrete next payoff.`
-          : "No reliable primary CTA was detected as the next step."
+          ? `The primary CTA is "${originalCta}" and does not describe the concrete payoff of the click.`
+          : "No primary CTA was detected that clearly triggers the next step."
     );
     addEvidence(
       language === "de"
-        ? `Insgesamt wurden ${evidence.ctas.ctaCount} CTA-Signale erkannt, was die Handlungsführung aktuell zu dünn macht.`
-        : `${evidence.ctas.ctaCount} CTA signals were detected overall, which makes the action path too thin right now.`
+        ? `Es wurden insgesamt ${evidence.ctas.ctaCount} CTA-Signale erkannt, aber keines fuehrt den Kauf mit einem klaren Ergebnisversprechen.`
+        : `${evidence.ctas.ctaCount} CTA signals were detected overall, but none of them leads the purchase with a clear payoff statement.`
     );
     addEvidence(
       language === "de"
         ? evidence.ctas.aboveTheFold
-          ? "Der CTA ist oberhalb des ersten Scrolls technisch vorhanden, wirkt aber noch zu generisch."
-          : "Der CTA ist nicht klar genug oberhalb des ersten Scrolls verankert."
+          ? "Die CTA steht im ersten Screen, bleibt aber auf Shop-Sprache statt auf Kaufnutzen stehen."
+          : "Die CTA erscheint nicht stabil genug im ersten Screen und verliert dadurch Kaufdruck."
         : evidence.ctas.aboveTheFold
-          ? "The CTA is technically present above the first scroll, but it still reads as too generic."
-          : "The CTA is not clearly anchored above the first scroll."
+          ? "The CTA sits in the first screen, but it stays at shop language instead of buying payoff."
+          : "The CTA is not anchored strongly enough in the first screen and loses buying pressure."
     );
   } else if (type === "TRUST") {
     addEvidence(
       language === "de"
-        ? `Es wurden nur ${evidence.trust.reviewsCount} Bewertungs-Signale, ${evidence.trust.trustKeywordsCount} weitere Vertrauens-Treffer und ${evidence.trust.paymentSignalsCount} Zahlungs-Signale erkannt.`
-        : `Only ${evidence.trust.reviewsCount} review signals, ${evidence.trust.trustKeywordsCount} additional trust hits, and ${evidence.trust.paymentSignalsCount} payment signals were detected.`
+        ? `Es wurden ${evidence.trust.reviewsCount} Bewertungs-Signale, ${evidence.trust.trustKeywordsCount} weitere Vertrauens-Treffer und ${evidence.trust.paymentSignalsCount} Zahlungs-Signale erkannt.`
+        : `${evidence.trust.reviewsCount} review signals, ${evidence.trust.trustKeywordsCount} additional trust hits, and ${evidence.trust.paymentSignalsCount} payment signals were detected.`
     );
     addEvidence(
       language === "de"
         ? evidence.trust.returnPolicyDetected
-          ? "Rückgabe-Hinweise sind zwar vorhanden, tragen den Kaufmoment aber noch nicht stark genug."
-          : "Es wurde kein klarer Rückgabe- oder Risikoabbau direkt für den Kaufmoment erkannt."
+          ? "Rueckgabe-Hinweise sind vorhanden, stehen aber nicht hart genug direkt an Preis und CTA."
+          : "Direkt am Kaufmoment wurde kein sichtbarer Risikoabbau ueber Rueckgabe, Garantie oder Zahlungssicherheit erkannt."
         : evidence.trust.returnPolicyDetected
-          ? "Return-policy cues are present, but they are not carrying the purchase moment strongly enough."
-          : "No clear return or risk-reduction cue was detected around the purchase moment."
+          ? "Return cues exist, but they are not placed hard enough next to price and CTA."
+          : "No visible risk-reduction cue was detected at the buying moment through returns, guarantees, or payment reassurance."
     );
     addEvidence(
       language === "de"
-        ? "Ohne belastbare Vertrauenssignale am Kaufmoment bleibt die Kaufentscheidung unnötig offen."
-        : "Without strong trust cues near the purchase moment, the buying decision stays unnecessarily open."
+        ? "Ohne harte Sicherheits- und Proof-Signale kippt bestehendes Interesse vor dem Kauf in Zoegern."
+        : "Without hard proof and reassurance signals, existing intent turns into hesitation before purchase."
     );
   } else if (type === "MOBILE") {
     addEvidence(
       language === "de"
-        ? "Die mobile Bewertung ist schwächer als die strukturelle Gesamtleistung der Seite."
-        : "The mobile score is weaker than the page's overall structural performance."
+        ? "Die mobile Bewertung faellt hinter die strukturelle Gesamtleistung der Seite zurueck."
+        : "The mobile score falls behind the page's overall structural performance."
     );
     addEvidence(
       language === "de"
-        ? `Es wurden ${evidence.structure.h2.length} H2-Signale und ${evidence.ctas.ctaCount} CTA-Signale erkannt, aber die Argumente verdichten sich mobil nicht früh genug.`
-        : `${evidence.structure.h2.length} H2 signals and ${evidence.ctas.ctaCount} CTA signals were detected, but the arguments do not compress early enough on mobile.`
+        ? `Es wurden ${evidence.structure.h2.length} H2-Signale und ${evidence.ctas.ctaCount} CTA-Signale erkannt, aber Nutzen und Kaufgrund landen mobil zu spaet.`
+        : `${evidence.structure.h2.length} H2 signals and ${evidence.ctas.ctaCount} CTA signals were detected, but value and buying reason land too late on mobile.`
     );
     addEvidence(
       language === "de"
-        ? "Die mobile Priorisierung braucht weniger Streuung und früheren Kaufkontext vor dem ersten Scroll."
-        : "Mobile prioritization needs less spread and earlier buying context before the first scroll."
+        ? "Vor dem ersten mobilen Scroll fehlen zu viele Kaufargumente in verdichteter Form."
+        : "Too many buying arguments are missing in compressed form before the first mobile scroll."
     );
   } else {
     addEvidence(
       language === "de"
-        ? `Es wurden ${evidence.ctas.ctaCount} CTA-Signale, ${evidence.trust.paymentSignalsCount} Zahlungs-Signale und ${evidence.trust.reviewsCount} Bewertungs-Signale erkannt, aber der Kaufmoment bleibt noch zu offen.`
-        : `${evidence.ctas.ctaCount} CTA signals, ${evidence.trust.paymentSignalsCount} payment signals, and ${evidence.trust.reviewsCount} review signals were detected, but the purchase moment still stays too open.`
+        ? `Es wurden ${evidence.ctas.ctaCount} CTA-Signale, ${evidence.trust.paymentSignalsCount} Zahlungs-Signale und ${evidence.trust.reviewsCount} Bewertungs-Signale erkannt, aber sie greifen am Kaufmoment nicht als ein geschlossener Block.`
+        : `${evidence.ctas.ctaCount} CTA signals, ${evidence.trust.paymentSignalsCount} payment signals, and ${evidence.trust.reviewsCount} review signals were detected, but they do not work as one closed buying block.`
     );
     addEvidence(
       language === "de"
         ? evidence.trust.returnPolicyDetected
-          ? "Rückgabe-Hinweise sind vorhanden, aber Preis, CTA und Absicherung greifen noch nicht eng genug ineinander."
-          : "Preis, CTA und Absicherung greifen noch nicht eng genug ineinander."
+          ? "Rueckgabe-Hinweise sind vorhanden, stehen aber zu weit von Preis und CTA entfernt."
+          : "Preis, CTA und Sicherheitsargumente stehen zu getrennt, um den Abschluss direkt auszulosen."
         : evidence.trust.returnPolicyDetected
-          ? "Return cues are present, but price, CTA, and reassurance are not yet working tightly enough together."
-          : "Price, CTA, and reassurance are not yet working tightly enough together."
+          ? "Return cues are present, but they sit too far away from price and CTA."
+          : "Price, CTA, and reassurance are too separated to trigger the purchase directly."
     );
     addEvidence(
       language === "de"
-        ? `Die Seite liefert ${evidence.structure.sectionsCount} Sektionen, wodurch der Weg zur Entscheidung erklärend statt entschlossen wirkt.`
-        : `The page uses ${evidence.structure.sectionsCount} sections, so the path to conversion feels explanatory rather than decisive.`
+        ? `Die Seite nutzt ${evidence.structure.sectionsCount} Sektionen, wodurch der Weg zur Entscheidung erklaert statt geschlossen wirkt.`
+        : `The page uses ${evidence.structure.sectionsCount} sections, so the path to purchase feels explained instead of closed.`
     );
   }
 
@@ -1815,96 +1871,104 @@ function selectPrimaryDecision({ evidence, scores, impactEstimate, language }) {
     language === "de"
       ? {
           VALUE_PROPOSITION: {
-            title: "Der erste Screen erklärt den Produktnutzen nicht klar genug",
+            title: "Dein Above-the-fold zeigt ein Produkt, aber keinen klaren Nutzen",
             problem:
-              "Die Seite zeigt zwar Produktkontext, aber der konkrete Nutzen verdichtet sich im ersten Screen noch nicht stark genug für kalten Traffic.",
+              "Dein Above-the-fold zeigt ein Produkt, aber keinen klaren Nutzen – Nutzer wissen nicht sofort, warum sie bleiben oder kaufen sollen.",
             action:
-              "Verdichte Headline, erste Supporting-Zeilen und CTA auf ein klares Ergebnis, damit der Nutzen vor Details und Navigation steht.",
+              /leave-in|conditioner|shampoo|maske|hair/i.test(productType)
+                ? "Schreibe die Headline als konkretes Ergebnis statt als Produktbeschreibung. Ergaenze eine kurze Supporting-Zeile und eine sichtbare CTA direkt im ersten Screen. Beispiel: \"Frizz-freies, gepflegtes Haar nach jeder Anwendung\"."
+                : "Schreibe die Headline als konkretes Ergebnis statt als Produktbeschreibung. Ergaenze eine kurze Supporting-Zeile und eine sichtbare CTA direkt im ersten Screen.",
             expectedOutcome:
-              "Mehr Besucher verstehen schneller, warum dieses Produkt relevant ist, und gehen mit höherer Kaufabsicht weiter.",
+              "Mehr Besucher erfassen den Nutzen in wenigen Sekunden und gehen mit deutlich mehr Kaufabsicht in den naechsten Schritt.",
           },
           CTA: {
-            title: "Der CTA ist sichtbar, aber nicht handlungsstark genug",
+            title: "Der CTA ist sichtbar, aber er loest keinen klaren Kaufimpuls aus",
             problem:
-              "Der nächste Schritt ist aktuell zu generisch formuliert oder nicht klar genug als Nutzenversprechen lesbar.",
+              "Der CTA steht im ersten Screen, sagt aber nicht, was der Klick bringt – dadurch stoppt die Bewegung Richtung Kauf genau am Entscheidungspunkt.",
             action:
-              "Formuliere den primären CTA ergebnisorientierter und platziere ihn enger an den direkt spürbaren Nutzen des Produkts.",
+              /leave-in|conditioner|shampoo|maske|hair/i.test(productType)
+                ? "Formuliere den CTA als direktes Ergebnis statt als Shop-Label und setze ihn unmittelbar unter Nutzenversprechen und Supporting-Zeile. Beispiel: \"Zu gepflegterem Haar starten\"."
+                : "Formuliere den CTA als direktes Ergebnis statt als Shop-Label und setze ihn unmittelbar unter Nutzenversprechen und Supporting-Zeile.",
             expectedOutcome:
-              "Mehr Nutzer erkennen schneller, was der Klick bringt, und brechen seltener vor dem nächsten Schritt ab.",
+              "Mehr Nutzer verstehen den naechsten Schritt ohne Nachdenken und klicken haeufiger in den Kaufprozess.",
           },
           TRUST: {
             title: "Vertrauen fehlt direkt am Kaufmoment",
             problem:
-              "Die Seite liefert zu wenig belastbare Sicherheits- und Proof-Signale genau dort, wo Nutzer den Kauf absichern wollen.",
+              "Am Kaufmoment fehlen Reviews, Rueckgabe oder Zahlungssicherheit direkt neben Preis und CTA – genau dort suchen Nutzer nach Risikoabbau.",
             action:
-              "Ziehe Reviews, Garantien, Rückgabe- und Zahlungs-Hinweise dichter an Preis und primäre CTA, statt sie später oder diffuser zu zeigen.",
+              "Zeige Reviews, Rueckgabe- und Zahlungssicherheit direkt neben Preis und CTA, statt diese Signale weiter unten oder verstreut zu lassen.",
             expectedOutcome:
-              "Die Kaufentscheidung wirkt weniger riskant, wodurch mehr Nutzer mit bestehendem Interesse tatsächlich weitergehen.",
+              "Die Kaufentscheidung wirkt abgesichert, sodass bestehendes Interesse seltener in Zoegern kippt.",
           },
           MOBILE: {
             title: "Mobile Nutzer sehen zu wenig Kaufargumente vor dem ersten Scroll",
             problem:
-              "Mobil verdichten sich Nutzen, Proof und Handlungsführung nicht früh genug, obwohl diese Signale für schnelle Entscheidungen zentral sind.",
+              "Auf Mobile landen Nutzen, Proof und CTA zu spaet oder zu verstreut im ersten Screen – dadurch fehlt der Grund zum Weiterscrollen oder Kaufen.",
             action:
-              "Straffe den mobilen ersten Screen, priorisiere Nutzen vor Nebensignalen und bringe CTA plus Vertrauenskontext früher in die Reihenfolge.",
+              "Reduziere den ersten mobilen Screen auf Headline, eine Supporting-Zeile, eine klare CTA und einen sichtbaren Vertrauenshinweis direkt darunter.",
             expectedOutcome:
-              "Mobile Nutzer bekommen früher genug Kaufkontext, wodurch der erste Scroll seltener zum Abbruchpunkt wird.",
+              "Mobile Nutzer sehen frueher genug Kaufargumente und springen seltener vor dem ersten Scroll ab.",
           },
           FRICTION: {
-            title: "Der Kaufmoment lässt noch zu viele offene Fragen zu",
+            title: "Der Kaufmoment laesst zu viele offene Fragen stehen",
             problem:
-              "Der Weg vom Interesse zur Entscheidung ist noch nicht entschlossen genug geführt und überlässt dem Nutzer zu viel Interpretationsarbeit.",
+              "Preis, CTA, Sicherheitsargumente und letzte Kaufgruende stehen nicht eng genug zusammen – Nutzer muessen den Abschluss selbst zusammensetzen.",
             action:
-              "Bringe CTA, Risikoabbau und letzte Kaufargumente enger zusammen, damit der Abschluss wie der logische nächste Schritt wirkt.",
+              "Ordne Preis, CTA, Versand, Rueckgabe und letzte Produktargumente in einen kompakten Kaufblock direkt am Entscheidungspunkt.",
             expectedOutcome:
-              "Mehr Nutzer erreichen den Kaufmoment mit weniger Unsicherheit und weniger Reibung vor dem Abschluss.",
+              "Mehr Nutzer erreichen den Abschluss mit weniger Unsicherheit und weniger Abbruch vor dem Kauf.",
           },
         }
       : {
           VALUE_PROPOSITION: {
-            title: "The first screen does not explain the product payoff clearly enough",
+            title: "Your above-the-fold shows a product, but not a clear payoff",
             problem:
-              "The page shows product context, but the concrete payoff still does not compress strongly enough in the first screen for cold traffic.",
+              "Your above-the-fold shows a product, but not a clear payoff, so visitors do not immediately understand why they should stay or buy.",
             action:
-              "Tighten the headline, first supporting lines, and CTA around one clear outcome so the value lands before details and navigation.",
+              /leave-in|conditioner|shampoo|mask|hair/i.test(productType)
+                ? "Write the headline as a concrete outcome instead of a product description. Add one short supporting line and a visible CTA directly in the first screen. Example: \"Frizz-free, smoother hair after every use.\""
+                : "Write the headline as a concrete outcome instead of a product description. Add one short supporting line and a visible CTA directly in the first screen.",
             expectedOutcome:
-              "More visitors will understand faster why this product matters and move forward with stronger buying intent.",
+              "More visitors understand the payoff within seconds and move forward with stronger buying intent.",
           },
           CTA: {
-            title: "The CTA is visible, but it is not action-strong enough",
+            title: "The CTA is visible, but it does not trigger a clear buying impulse",
             problem:
-              "The next step is still phrased too generically or does not read clearly enough as a concrete shopper payoff.",
+              "The CTA sits in the first screen but does not tell shoppers what the click gives them, so momentum slows exactly at the decision point.",
             action:
-              "Rewrite the primary CTA around a clearer outcome and place it closer to the most immediate product benefit.",
+              /leave-in|conditioner|shampoo|mask|hair/i.test(productType)
+                ? "Rewrite the CTA as a direct outcome instead of a shop label and place it immediately under the value promise and supporting line. Example: \"Start smoother hair today.\""
+                : "Rewrite the CTA as a direct outcome instead of a shop label and place it immediately under the value promise and supporting line.",
             expectedOutcome:
-              "More users will understand what the click gives them and drop off less before the next step.",
+              "More users understand the next step instantly and click into the buying flow more often.",
           },
           TRUST: {
             title: "Trust is missing right at the buying moment",
             problem:
-              "The page gives too little proof and reassurance exactly where shoppers want to de-risk the purchase.",
+              "Reviews, returns, or payment reassurance are missing next to price and CTA, which is exactly where shoppers look to reduce purchase risk.",
             action:
-              "Pull reviews, guarantees, return cues, and payment reassurance closer to price and the primary CTA instead of leaving them later or more diffuse.",
+              "Place reviews, returns, and payment reassurance directly next to price and CTA instead of leaving them lower on the page or spread out.",
             expectedOutcome:
-              "The purchase feels less risky, so more already-interested users continue instead of hesitating.",
+              "The purchase feels safer, so existing intent is less likely to turn into hesitation.",
           },
           MOBILE: {
             title: "Mobile users see too few buying arguments before the first scroll",
             problem:
-              "On mobile, value, proof, and action guidance do not compress early enough even though those signals drive faster decisions.",
+              "On mobile, value, proof, and CTA arrive too late or too scattered in the first screen, so shoppers do not get a strong reason to keep going or buy.",
             action:
-              "Tighten the mobile first screen, prioritize value before secondary signals, and move CTA plus reassurance earlier in the sequence.",
+              "Reduce the first mobile screen to a headline, one supporting line, one clear CTA, and one visible trust cue directly underneath.",
             expectedOutcome:
-              "Mobile visitors get enough buying context earlier, so the first scroll becomes less of a drop-off point.",
+              "Mobile visitors get enough buying context earlier, which reduces first-scroll drop-off.",
           },
           FRICTION: {
             title: "The buying moment still leaves too many open questions",
             problem:
-              "The path from interest to decision is not yet guided decisively enough and leaves too much interpretation work to the shopper.",
+              "Price, CTA, reassurance, and final buying reasons are not grouped tightly enough, so shoppers have to assemble the decision on their own.",
             action:
-              "Bring the CTA, risk reduction, and final buying arguments closer together so the next step feels like the logical conclusion.",
+              "Group price, CTA, shipping, returns, and final buying arguments into one compact purchase block at the decision point.",
             expectedOutcome:
-              "More shoppers reach the purchase moment with less uncertainty and less friction before conversion.",
+              "More shoppers reach checkout with less uncertainty and less abandonment before conversion.",
           },
         };
 
@@ -1912,13 +1976,123 @@ function selectPrimaryDecision({ evidence, scores, impactEstimate, language }) {
     type,
     title: contentByType[type].title,
     impactHeadline: buildImpactHeadline(impactEstimate, language),
+    impactReason: buildPrimaryDecisionImpactReason(language),
     problem: contentByType[type].problem,
-    evidence: evidenceList,
     action: contentByType[type].action,
     suggestedCopy,
+    evidence: evidenceList,
     expectedOutcome: contentByType[type].expectedOutcome,
     confidence,
   };
+}
+
+function selectPrimaryDecision(input) {
+  return getPrimaryDecision(input);
+}
+
+function runPrimaryDecisionConsoleTests() {
+  const testCases = [
+    {
+      label: "value-proposition",
+      input: {
+        language: "de",
+        scores: {
+          aboveTheFold: 4,
+          valueProposition: 4,
+          cta: 7,
+          trustSignals: 7,
+          informationHierarchy: 6,
+        },
+        impactEstimate: {
+          monthlyImpactLow: 9000,
+          monthlyImpactHigh: 17000,
+          currency: "EUR",
+        },
+        evidence: {
+          structure: { h1: [], h2: ["Benefits"], h3: [], sectionsCount: 8 },
+          ctas: { primaryText: "Jetzt shoppen", ctaCount: 1, aboveTheFold: false },
+          trust: {
+            reviewsCount: 4,
+            trustKeywordsCount: 2,
+            paymentSignalsCount: 2,
+            returnPolicyDetected: true,
+          },
+          product: { productDetailScore: 0.6 },
+          text: { totalTextLength: 2400 },
+          pageSignals: { notFoundDetected: false },
+          screenshotsAvailable: true,
+        },
+      },
+    },
+    {
+      label: "cta",
+      input: {
+        language: "en",
+        scores: {
+          aboveTheFold: 8,
+          valueProposition: 8,
+          cta: 4,
+          trustSignals: 8,
+          informationHierarchy: 7,
+        },
+        impactEstimate: {
+          monthlyImpactLow: 12000,
+          monthlyImpactHigh: 22000,
+          currency: "EUR",
+        },
+        evidence: {
+          structure: { h1: ["Smooth hair without heaviness"], h2: ["Proof"], h3: [], sectionsCount: 7 },
+          ctas: { primaryText: "Shop now", ctaCount: 2, aboveTheFold: true },
+          trust: {
+            reviewsCount: 8,
+            trustKeywordsCount: 3,
+            paymentSignalsCount: 3,
+            returnPolicyDetected: true,
+          },
+          product: { productDetailScore: 0.8 },
+          text: { totalTextLength: 3200 },
+          pageSignals: { notFoundDetected: false },
+          screenshotsAvailable: true,
+        },
+      },
+    },
+    {
+      label: "trust-dom-only",
+      input: {
+        language: "de",
+        scores: {
+          aboveTheFold: 8,
+          valueProposition: 8,
+          cta: 8,
+          trustSignals: 4,
+          informationHierarchy: 7,
+        },
+        impactEstimate: {
+          monthlyImpactLow: null,
+          monthlyImpactHigh: null,
+          currency: "EUR",
+        },
+        evidence: {
+          structure: { h1: ["Pflege fuer trockenes Haar"], h2: ["Anwendung"], h3: [], sectionsCount: 5 },
+          ctas: { primaryText: "Zu gepflegterem Haar starten", ctaCount: 1, aboveTheFold: true },
+          trust: {
+            reviewsCount: 0,
+            trustKeywordsCount: 0,
+            paymentSignalsCount: 0,
+            returnPolicyDetected: false,
+          },
+          product: { productDetailScore: 0.7 },
+          text: { totalTextLength: 1800 },
+          pageSignals: { notFoundDetected: false },
+          screenshotsAvailable: false,
+        },
+      },
+    },
+  ];
+
+  testCases.forEach(({ label, input }) => {
+    console.log(`[getPrimaryDecision:test:${label}]`, getPrimaryDecision(input));
+  });
 }
 
 function buildDomOnlyVisualFindings(evidence, scores, language) {
@@ -3266,11 +3440,12 @@ function buildResponse({
     primaryProblem,
     language,
   });
-  const primaryDecision = selectPrimaryDecision({
+  const primaryDecision = getPrimaryDecision({
     evidence: finalEvidence,
     scores: finalResult.scores,
     impactEstimate,
     language,
+    isFallback: Boolean(isFallback || !qualityCheck.valid),
   });
   const visualFindings = finalEvidence.screenshotsAvailable
     ? finalResult.visualFindings
@@ -3372,9 +3547,9 @@ export async function apiHandler(request, response) {
       visualMetrics = captureResult.visualMetrics;
     } catch (error) {
       console.error("Screenshot failed", error.message);
-      warnings.push(getLanguagePack(submittedLanguage).screenshotWarning);
+      pushUniqueWarning(warnings, getLanguagePack(submittedLanguage).screenshotWarning);
       if (error.message === "SCREENSHOT_CAPTURE_TIMEOUT") {
-        warnings.push(getLanguagePack(submittedLanguage).timeoutWarning);
+        pushUniqueWarning(warnings, getLanguagePack(submittedLanguage).timeoutWarning);
       }
       try {
         evidence = buildEvidenceFromHtml(await fetchPageHtml(submittedUrl), submittedUrl);
@@ -3430,9 +3605,9 @@ export async function apiHandler(request, response) {
       console.log("AI call success");
     } catch (error) {
       console.error("AI call failure", error.message);
-      warnings.push(getLanguagePack(submittedLanguage).aiWarning);
+      pushUniqueWarning(warnings, getLanguagePack(submittedLanguage).aiWarning);
       if (error.message === "AI_ANALYSIS_TIMEOUT") {
-        warnings.push(getLanguagePack(submittedLanguage).timeoutWarning);
+        pushUniqueWarning(warnings, getLanguagePack(submittedLanguage).timeoutWarning);
       }
       isFallback = true;
     }
@@ -3473,7 +3648,7 @@ export async function apiHandler(request, response) {
       return;
     }
 
-    warnings.push(getLanguagePack(submittedLanguage).aiWarning);
+    pushUniqueWarning(warnings, getLanguagePack(submittedLanguage).aiWarning);
     const fallbackEvidence = buildFallbackEvidence(submittedUrl);
     const fallbackResponse = buildResponse({
       url: submittedUrl,
@@ -3505,6 +3680,9 @@ const isDirectRun =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isDirectRun) {
+  if (process.env.NODE_ENV !== "production") {
+    runPrimaryDecisionConsoleTests();
+  }
   const server = createServer(apiHandler);
   console.log("Server starting...");
   server.listen(PORT, () => {

@@ -345,6 +345,20 @@ function localizeConfidence(value, copy) {
   return copy.confidenceLevels?.[key] || key;
 }
 
+async function readJsonResponse(response, fallbackMessage) {
+  const rawText = await response.text();
+
+  if (!rawText.trim()) {
+    throw new Error(fallbackMessage);
+  }
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    throw new Error(fallbackMessage);
+  }
+}
+
 function App() {
   const [language, setLanguage] = useState(() => {
     if (typeof window === "undefined") {
@@ -452,7 +466,7 @@ function App() {
         }),
       });
 
-      const data = await response.json();
+      const data = await readJsonResponse(response, copy.requestFailed);
       if (!response.ok) {
         throw new Error(data?.error || copy.requestFailed);
       }
@@ -702,42 +716,42 @@ function App() {
                 <div className="impact-card primary-decision-impact">
                   <strong>{primaryDecision.impactHeadline}</strong>
                 </div>
-                <h3 className="primary-decision-title">{primaryDecision.title}</h3>
+                {primaryDecision.impactReason ? (
+                  <p className="body-copy primary-decision-problem">{primaryDecision.impactReason}</p>
+                ) : null}
                 <p className="body-copy primary-decision-problem">{primaryDecision.problem}</p>
 
-                <div className="primary-decision-grid">
-                  <div className="primary-decision-column">
-                    <span className="meta-label">{copy.evidence}</span>
-                    <ul className="bullet-list bullet-list-strong">
-                      {primaryDecision.evidence.slice(0, 3).map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
+                <div className="primary-decision-block">
+                  <span className="meta-label">{copy.actionLabel}</span>
+                  <p className="body-copy primary-decision-action">{primaryDecision.action}</p>
+                </div>
+
+                {primaryDecision.suggestedCopy ? (
+                  <div className="version-block primary-decision-block">
+                    <span className="meta-label">{copy.suggestedCopy}</span>
+                    <span className="cta-pill">{primaryDecision.suggestedCopy}</span>
                   </div>
+                ) : null}
 
-                  <div className="primary-decision-column">
-                    <span className="meta-label">{copy.actionLabel}</span>
-                    <p className="body-copy primary-decision-action">{primaryDecision.action}</p>
+                <div className="primary-decision-block">
+                  <span className="meta-label">{copy.evidence}</span>
+                  <ul className="bullet-list bullet-list-strong">
+                    {primaryDecision.evidence.slice(0, 3).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
 
-                    {primaryDecision.suggestedCopy ? (
-                      <div className="version-block primary-decision-block">
-                        <span className="meta-label">{copy.suggestedCopy}</span>
-                        <span className="cta-pill">{primaryDecision.suggestedCopy}</span>
-                      </div>
-                    ) : null}
+                <div className="version-block primary-decision-block">
+                  <span className="meta-label">{copy.expectedOutcome}</span>
+                  <p className="body-copy primary-decision-outcome">{primaryDecision.expectedOutcome}</p>
+                </div>
 
-                    <div className="version-block primary-decision-block">
-                      <span className="meta-label">{copy.expectedOutcome}</span>
-                      <p className="body-copy primary-decision-outcome">{primaryDecision.expectedOutcome}</p>
-                    </div>
-
-                    <div className="version-block primary-decision-block">
-                      <span className="meta-label">{copy.confidence}</span>
-                      <p className="primary-decision-confidence">
-                        {localizeConfidence(primaryDecision.confidence, copy)}
-                      </p>
-                    </div>
-                  </div>
+                <div className="version-block primary-decision-block">
+                  <span className="meta-label">{copy.confidence}</span>
+                  <p className="primary-decision-confidence">
+                    {localizeConfidence(primaryDecision.confidence, copy)}
+                  </p>
                 </div>
               </article>
             ) : null}
